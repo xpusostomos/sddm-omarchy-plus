@@ -1,0 +1,108 @@
+-- SDDM Wayland greeter compositor configuration, installed by omarchy-plus.
+--
+-- Selected by /etc/sddm.conf.d/zz-omarchy-plus-wayland.conf. The package-owned
+-- /usr/share/sddm/hyprland.lua is loaded below rather than edited: it belongs
+-- to omarchy-settings and a package upgrade would revert any change to it.
+--
+-- This file exists because the greeter is the only place the login screen can
+-- be rotated from. SDDM's theme QML cannot execute anything, so the rotation
+-- has to come from the compositor's own config, and there is no SDDM hook that
+-- runs a script when the Wayland greeter compositor starts.
+--
+-- Rendered from autorotate.lua.in -- re-run 'sudo make install-autorotate'
+-- rather than editing this copy.
+-- omarchy-plus: output=@OUTPUT@ transform=@TRANSFORM@
+
+-- The stock greeter settings, loaded first so omarchy-settings upgrades keep
+-- taking effect. The inline copy is what that file contained when this project
+-- was written, used only if it is missing or unreadable.
+if not pcall(dofile, "/usr/share/sddm/hyprland.lua") then
+  hl.config({
+    misc = {
+      disable_hyprland_logo = true,
+      disable_splash_rendering = true,
+      force_default_wallpaper = 0,
+    },
+    animations = { enabled = false },
+  })
+end
+
+-- transform is the raw wl_output_transform, the number 'hyprctl monitors'
+-- reports: 0 = 0deg, 1 = 90deg, 2 = 180deg, 3 = 270deg.
+local TARGET_OUTPUT   = "@OUTPUT@"
+local FIXED_TRANSFORM = @TRANSFORM@
+local WATCHER         = "@WATCHER@"
+
+-- Panels that are part of the machine, as opposed to something plugged in.
+-- External outputs (HDMI-*, DP-*, a TV) are deliberately never matched, so a
+-- docked machine cannot have its external screen rotated at the login screen
+-- no matter which output happens to be focused.
+local function is_internal_panel(name)
+  return name:match("^eDP") ~= nil
+      or name:match("^DSI") ~= nil
+      or name:match("^LVDS") ~= nil
+end
+
+-- Which output to rotate, or nil when nothing suitable is attached yet -- the
+-- monitor.added handler below retries when the panel shows up.
+local function resolve_output()
+  local monitors = hl.get_monitors and hl.get_monitors() or {}
+
+  for _, monitor in ipairs(monitors) do
+    if monitor.name == TARGET_OUTPUT then
+      return monitor.name
+    end
+  end
+
+  for _, monitor in ipairs(monitors) do
+    if monitor.name and is_internal_panel(monitor.name) then
+      return monitor.name
+    end
+  end
+
+  -- "auto" with nothing recognised by name: one output is unambiguous.
+  if TARGET_OUTPUT == "auto" and #monitors == 1 then
+    return monitors[1].name
+  end
+
+  return nil
+end
+
+local function apply(direction)
+  local output = resolve_output()
+  if not output then
+    return
+  end
+
+  hl.monitor({
+    output = output,
+    mode = "preferred",
+    position = "auto",
+    scale = 1,
+    transform = direction,
+  })
+end
+
+-- Global on purpose: the watcher calls this through 'hyprctl eval "rotate(N)"',
+-- which evaluates in this same Lua state as the config was loaded into -- but
+-- only globals are visible there, not locals.
+function rotate(direction)
+  apply(direction)
+end
+
+-- A monitor rule added before its output exists is applied when the output
+-- appears, so applying at start-up and again on hotplug covers both orders.
+apply(FIXED_TRANSFORM)
+
+hl.on("hyprland.start", function()
+  apply(FIXED_TRANSFORM)
+
+  -- Follow the accelerometer while the login screen is up. Without
+  -- iio-sensor-proxy the watcher exits immediately and the fixed orientation
+  -- above stands on its own.
+  hl.exec_cmd(WATCHER)
+end)
+
+hl.on("monitor.added", function()
+  apply(FIXED_TRANSFORM)
+end)

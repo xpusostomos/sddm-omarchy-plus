@@ -63,16 +63,119 @@ going stale.
 | `make install` | Installs `/usr/share/sddm/themes/omarchy-plus` and writes the `Current=` drop-in. Stock theme untouched. |
 | `make install-no-auto-login` | Comments out `User=` and `Session=` in `/etc/sddm.conf.d/autologin.conf` if not already commented, backing it up to `autologin.conf.orig`. Without this you never see the greeter — Omarchy enables autologin on encrypted installs. |
 | `make uninstall` | Removes the theme directory and the drop-in; SDDM falls back to the stock theme. |
-| `make status` | Reports whether the theme is installed, whether the drop-in is present, and whether autologin is on. |
+| `make install-autorotate` | Stops the login screen coming up rotated on a 2-in-1. Vars: `ORIENT=` (default `normal`), `OUTPUT=` (default `eDP-1`). Independent of `make install`. |
+| `make uninstall-autorotate` | Removes that; the greeter compositor goes back to the stock config. |
+| `make status` | Reports whether the theme is installed, whether the drop-in is present, whether autologin is on, and the state of the autorotate hook. |
 
-`install` and `install-no-auto-login` need root; they re-run themselves under
-`sudo` and explain what they are doing as they go.
+`install`, `install-no-auto-login` and `install-autorotate` need root; they
+re-run themselves under `sudo` and explain what they are doing as they go.
 
 A typical first run:
 
 ```sh
 make install
 make install-no-auto-login
+```
+
+## Upright login screen on a 2-in-1 (`make install-autorotate`)
+
+On a convertible whose panel is mounted 90° round, the session comes out right
+because `~/.config/hypr/` applies the orientation — but the login screen is
+rotated, because SDDM's Wayland greeter runs its **own** Hyprland as the `sddm`
+user, with a config of its own and no monitor rules in it.
+
+That config is the only place the rotation can be applied from, so this is a
+separate mechanism from the theme entirely. A rotate **button** in the theme is
+not possible: the greeter's QML cannot execute anything, so it could never call
+`hyprctl` — `SddmComponents` is loose `.qml` files with no compiled plugin, and
+no QML module on the system exposes process execution. The compositor config is
+also the only start-up hook available, since SDDM's `scripts/` directory is
+X11-`Xsetup` plumbing and its Wayland `SessionCommand` is for the logged-in
+session, not the greeter.
+
+So this installs a greeter config of its own and points SDDM at it:
+
+```
+/usr/share/sddm/omarchy-plus/hyprland.lua        greeter compositor config
+/usr/share/sddm/omarchy-plus/autorotate          accelerometer watcher
+/etc/sddm.conf.d/zz-omarchy-plus-wayland.conf    [Wayland] CompositorCommand=
+```
+
+Neither the theme nor the package-owned `/usr/share/sddm/hyprland.lua` is
+touched. Ours `dofile`s the package file, so its `misc`/`animations` settings
+keep applying and omarchy-settings upgrades to it keep taking effect. Reverting
+is removing the drop-in, or `make uninstall-autorotate`.
+
+`make install` and `make uninstall` do **not** touch any of this — the two
+features are independent.
+
+### Orientations
+
+`ORIENT=` takes the same words `monitor-sensor` prints, mapped to the transform
+value `hyprctl monitors` reports:
+
+| `ORIENT=` | transform | rotation |
+|---|---|---|
+| `normal` | 0 | 0° |
+| `left-up` | 1 | 90° |
+| `bottom-up` | 2 | 180° |
+| `right-up` | 3 | 270° |
+
+The fixed orientation is applied at greeter start-up, so the login screen is
+upright even with no sensor daemon — and being stored in the config, that value
+is also the "remembered" orientation. If the screen comes up the wrong way,
+use the other 90° value; if it is upside down, use `bottom-up`.
+
+### Automatic rotation
+
+To have the greeter follow the accelerometer as well, `iio-sensor-proxy` is
+needed, and it is **not installed by default**:
+
+```sh
+sudo pacman -S iio-sensor-proxy
+```
+
+With it present the watcher pipes `monitor-sensor` and drives the rotation
+through `hyprctl eval "rotate(N)"` — the same mechanism, and the same
+orientation mapping, as `~/bin/autorotate` uses in a session. `hyprctl eval`
+runs in the same Lua state the config was loaded into, which is why `rotate()`
+is defined as a global in it. Without the package the watcher exits at once and
+only the fixed orientation applies.
+
+### Only the internal panel
+
+Rotation is applied to `eDP*`, `DSI*` or `LVDS*` — or the exact `OUTPUT=` you
+name — and never to `HDMI-*` or `DP-*`, so a docked machine cannot have its
+external monitor rotated at the login screen. If your panel is named something
+else, nothing will move; use `OUTPUT=auto` or the real name.
+
+### Checking it
+
+`make status` reports the state of the hook, including the one genuinely
+dangerous case: an override present but its config missing, which would stop the
+greeter starting at all. Both scripts validate the rendered config with
+`luac -p` and `hyprland --verify-config` *before* installing anything.
+
+To see what would be installed, without installing or needing root:
+
+```sh
+./install-autorotate.sh --dry-run --orient left-up
+```
+
+None of this is exercised by `make preview`, which runs the greeter inside your
+own session and so never starts the greeter's compositor. The real check is to
+log out. From a TTY while the login screen is up (Ctrl+Alt+F3):
+
+```sh
+sudo -u sddm env XDG_RUNTIME_DIR=/run/sddm hyprctl monitors -j
+```
+
+Run it as `sddm`, not root — Hyprland's IPC socket is UID-checked.
+
+If the greeter ever fails to appear, undo it from a TTY:
+
+```sh
+sudo rm /etc/sddm.conf.d/zz-omarchy-plus-wayland.conf && sudo systemctl restart sddm
 ```
 
 ## Notes on SDDM 0.21
@@ -116,5 +219,9 @@ install.sh               installs as omarchy-plus, writes the Current= drop-in
 uninstall.sh             removes both
 disable-autologin.sh     comments out autologin
 preview.sh               greeter test-mode preview, installs nothing
+autorotate.lua.in        greeter compositor config template (rotation + watcher)
+autorotate-watch.sh      accelerometer watcher, installed as the greeter's autorotate
+install-autorotate.sh    installs the above, plus the [Wayland] override drop-in
+uninstall-autorotate.sh  removes them
 Makefile                 the targets above
 ```
