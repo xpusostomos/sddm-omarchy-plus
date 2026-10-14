@@ -1,0 +1,7 @@
+[SddmGreeterTheme]
+Name=Omarchy Plus
+Description=Omarchy login theme with a session selector, user switching and power controls
+Author=Chris Bitmead
+Type=sddm-theme
+Version=1.1
+QtVersion=6
